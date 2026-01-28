@@ -5,26 +5,51 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// 🔥 Render'da tarayıcıdan girince sunucunun çalıştığını görmek için:
+// 🔥 Render Health Check
 app.get('/', (req, res) => {
-    res.send("🚀 Ludo Sunucusu Aktif ve Çalışıyor!");
+    res.send("🚀 Ludo Sunucusu (Lobi Destekli) Aktif!");
 });
 
-// 🔥 Socket.io Ayarları (Bağlantı kopmalarını önlemek için ping ayarları eklendi)
+// 🔥 Socket.io Ayarları
 const io = new Server(server, { 
     cors: { 
-        origin: "*",
+        origin: "*", 
         methods: ["GET", "POST"]
     },
-    pingTimeout: 60000, // 60 saniye boyunca yanıt gelmezse kapat (Render için iyi)
-    pingInterval: 25000 // 25 saniyede bir kontrol et
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
 
 let rooms = {}; 
 const COLORS = ['red', 'green', 'yellow', 'blue']; 
 
+// 🔥 YARDIMCI FONKSİYON: İstemcilere gidecek temiz oda listesi
+function getRoomList() {
+    let roomList = [];
+    for (const [id, room] of Object.entries(rooms)) {
+        // Sadece oyunu başlamamış ve boş yeri olan odaları listele
+        if (room.players.length < room.maxPlayers && !room.isGameStarted) {
+            roomList.push({
+                roomId: id,
+                playerCount: room.players.length,
+                maxPlayers: room.maxPlayers
+            });
+        }
+    }
+    return roomList;
+}
+
 io.on('connection', (socket) => {
     console.log('Yeni Oyuncu Bağlandı:', socket.id);
+
+    // 1️⃣ BAĞLANIR BAĞLANMAZ LİSTEYİ GÖNDER
+    // Yeni gelen oyuncu, o anki açık odaları hemen görür.
+    socket.emit('room_list_update', getRoomList());
+
+    // İstemci manuel olarak liste isterse (Yenile butonu vs.)
+    socket.on('get_room_list', () => {
+        socket.emit('room_list_update', getRoomList());
+    });
 
     // --- ODA OLUŞTURMA ---
     socket.on('create_room', (data) => {
@@ -35,12 +60,16 @@ io.on('connection', (socket) => {
             players: [socket.id],
             maxPlayers: capacity, 
             currentTurnIndex: 0,
-            badLuckCounters: {} 
+            badLuckCounters: {},
+            isGameStarted: false // Oyun başladı mı kontrolü
         };
 
         socket.join(roomId);
-        console.log(`Oda Kuruldu: ${roomId} (Kapasite: ${capacity})`);
+        console.log(`Oda Kuruldu: ${roomId}`);
         socket.emit('room_created', { roomId: roomId });
+        
+        // 🔥 HERKESE GÜNCEL LİSTEYİ DUYUR (Yeni oda açıldı!)
+        io.emit('room_list_update', getRoomList());
     });
 
     // --- ODAYA KATILMA ---
@@ -59,8 +88,12 @@ io.on('connection', (socket) => {
             }
             
             socket.join(roomId);
+            console.log(`Oyuncu ${socket.id}, ${roomId} odasına katıldı.`);
             socket.emit('room_joined', { roomId: roomId });
             io.to(roomId).emit('player_joined_room', { count: room.players.length });
+            
+            // 🔥 LİSTEYİ GÜNCELLE (Oda doluluk oranı değişti)
+            io.emit('room_list_update', getRoomList());
 
         } else {
             socket.emit('error', { message: 'Böyle bir oda bulunamadı!' });
@@ -72,6 +105,8 @@ io.on('connection', (socket) => {
         const { roomId } = data;
         if(rooms[roomId]) {
             const room = rooms[roomId];
+            room.isGameStarted = true; // Artık bu oda lobide görünmesin
+
             // Şans sayaçlarını sıfırla
             room.players.forEach(pid => {
                 if(!room.badLuckCounters) room.badLuckCounters = {};
@@ -94,36 +129,21 @@ io.on('connection', (socket) => {
                     index++;
                 }
             }
+            // 🔥 OYUN BAŞLADIĞI İÇİN LİSTEDEN KALDIR
+            io.emit('room_list_update', getRoomList());
         }
     });
 
-    // --- SOHBET MESAJI İLETİMİ ---
+    // --- SOHBET ---
     socket.on('send_chat_message', (data) => {
-        const { roomId, text, senderName } = data;
-        io.to(roomId).emit('receive_chat_message', {
+        io.to(data.roomId).emit('receive_chat_message', {
             senderId: socket.id,
-            senderName: senderName,
-            text: text
+            senderName: data.senderName,
+            text: data.text
         });
     });
 
-    // --- OYUNDAN ÇIKIŞ ---
-    socket.on('leave_game', (data) => {
-        const { roomId } = data;
-        if (rooms[roomId]) {
-            const room = rooms[roomId];
-            console.log(`Oyuncu ${socket.id} oyundan ayrıldı.`);
-            const remainingPlayerId = room.players.find(pid => pid !== socket.id);
-            
-            if (remainingPlayerId) {
-                const remainingIndex = room.players.indexOf(remainingPlayerId);
-                const winnerColor = COLORS[remainingIndex];
-                io.to(roomId).emit('game_over_by_disconnect', { winner: winnerColor });
-            }
-        }
-    });
-
-    // --- ZAR ATMA (Şans Faktörü Dahil) ---
+    // --- ZAR ATMA ---
     socket.on('roll_dice', (data) => {
         const { roomId } = data;
         if (rooms[roomId]) {
@@ -134,11 +154,9 @@ io.on('connection', (socket) => {
             if (room.badLuckCounters[playerId] === undefined) room.badLuckCounters[playerId] = 0;
 
             let diceValue;
-            // 5 kere 6 atamazsa yardım et
             if (room.badLuckCounters[playerId] >= 5) {
                 diceValue = 6;
                 room.badLuckCounters[playerId] = 0; 
-                console.log(`Oyuncu ${playerId} şans yardımı: 6`);
             } else {
                 diceValue = Math.floor(Math.random() * 6) + 1;
                 if (diceValue === 6) room.badLuckCounters[playerId] = 0;
@@ -148,33 +166,53 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('move_pawn', (data) => {
-        io.to(data.roomId).emit('pawn_moved', { pawnId: data.pawnId });
-    });
-
+    socket.on('move_pawn', (data) => io.to(data.roomId).emit('pawn_moved', data));
+    
     socket.on('pass_turn', (data) => {
-        const { roomId } = data;
-        if (rooms[roomId]) {
-            const room = rooms[roomId];
-            const currentPlayerId = room.players[room.currentTurnIndex];
-            
-            // Sıra kimdeyse o değiştirebilir
-            if (socket.id !== currentPlayerId) return; 
-
+         if (rooms[data.roomId]) {
+            const room = rooms[data.roomId];
             room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length; 
-            const nextColor = COLORS[room.currentTurnIndex];
-            io.to(roomId).emit('turn_changed', { currentTurn: nextColor });
+            io.to(data.roomId).emit('turn_changed', { currentTurn: COLORS[room.currentTurnIndex] });
         }
     });
 
+    // --- KOPMA (DISCONNECT) ---
     socket.on('disconnect', () => {
-        console.log("Bir oyuncu sunucudan koptu:", socket.id);
+        console.log("Kopan Oyuncu:", socket.id);
+        
+        // Oyuncunun olduğu odaları bul ve temizle
+        let listChanged = false;
+        for (const [id, room] of Object.entries(rooms)) {
+            if (room.players.includes(socket.id)) {
+                room.players = room.players.filter(pid => pid !== socket.id);
+                listChanged = true;
+                
+                // Eğer odada kimse kalmadıysa odayı sil
+                if (room.players.length === 0) {
+                    delete rooms[id];
+                    console.log(`Oda ${id} boşaldığı için silindi.`);
+                } else {
+                    // Odada biri kaldıysa ona haber ver
+                    io.to(id).emit('player_joined_room', { count: room.players.length });
+                    
+                    // Oyun başladıysa ve biri koptuysa oyunu bitir
+                    if (room.isGameStarted) {
+                         const remainingIndex = 0; 
+                         const winnerColor = COLORS[remainingIndex];
+                         io.to(id).emit('game_over_by_disconnect', { winner: winnerColor });
+                         delete rooms[id]; 
+                    }
+                }
+            }
+        }
+        // 🔥 BİRİ ÇIKINCA LİSTEYİ GÜNCELLE
+        if (listChanged) {
+            io.emit('room_list_update', getRoomList());
+        }
     });
 });
 
-// 🔥 Render Port Ayarı
 const PORT = process.env.PORT || 3000;
-
 server.listen(PORT, () => {
   console.log(`Sunucu ${PORT} portunda çalışıyor...`);
 });
