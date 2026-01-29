@@ -21,11 +21,8 @@ const io = new Server(server, {
 });
 
 let rooms = {};
-// 🔥 YENİ: Oyuncu detaylarını socket ID'ye göre saklıyoruz
 let playerDetails = {};
 const COLORS = ['red', 'green', 'yellow', 'blue'];
-
-// --- YARDIMCI FONKSİYONLAR ---
 
 function getRoomList() {
   let roomList = [];
@@ -41,19 +38,17 @@ function getRoomList() {
   return roomList;
 }
 
-// Oyuncu listesini oluşturup istemcilere gönder
 function broadcastPlayerUpdate(roomId) {
   if (!rooms[roomId]) return;
   const room = rooms[roomId];
 
-  // 🔥 GÜNCELLEME: İsim, Avatar ve DB ID'yi de gönderiyoruz
   const playerList = room.players.map((pid, index) => ({
     socketId: pid,
-    color: COLORS[index], // Oyuncunun rengini de bildiriyoruz
+    color: COLORS[index],
     isReady: room.readyStates[pid] || false,
     name: playerDetails[pid]?.name || "Oyuncu",
     avatar: playerDetails[pid]?.avatar || "assets/avatars/avatar_1.png",
-    dbId: playerDetails[pid]?.dbId || "" // Arkadaş eklemek için gerekli ID
+    dbId: playerDetails[pid]?.dbId || ""
   }));
 
   io.to(roomId).emit('player_update', {
@@ -69,9 +64,7 @@ io.on('connection', (socket) => {
     socket.emit('room_list_update', getRoomList());
   });
 
-  // --- ODA OLUŞTURMA ---
   socket.on('create_room', (data) => {
-    // 🔥 Verileri kaydet
     playerDetails[socket.id] = {
       name: data.name,
       avatar: data.avatar,
@@ -100,9 +93,7 @@ io.on('connection', (socket) => {
     io.emit('room_list_update', getRoomList());
   });
 
-  // --- ODAYA KATILMA ---
   socket.on('join_game', (data) => {
-    // 🔥 Verileri kaydet
     playerDetails[socket.id] = {
       name: data.name,
       avatar: data.avatar,
@@ -153,7 +144,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- OYUNU BAŞLAT ---
   socket.on('start_game_command', (data) => {
     const {
       roomId
@@ -162,7 +152,6 @@ io.on('connection', (socket) => {
       const room = rooms[roomId];
       room.isGameStarted = true;
 
-      // Şans sayaçlarını sıfırla
       room.players.forEach(pid => {
         if (!room.badLuckCounters) room.badLuckCounters = {};
         room.badLuckCounters[pid] = 0;
@@ -175,12 +164,10 @@ io.on('connection', (socket) => {
           const clientSocket = io.sockets.sockets.get(clientId);
           if (clientSocket) {
             const myColor = COLORS[index];
-            // 🔥 Rakiplerin detaylı listesini gönder
             clientSocket.emit('game_launch', {
               yourColor: myColor,
               roomId: roomId,
               playerCount: room.maxPlayers,
-              // Odadaki tüm oyuncuların detaylarını gönderiyoruz ki UI'da gösterilsin
               playersData: room.players.map((pid, idx) => ({
                 color: COLORS[idx],
                 name: playerDetails[pid]?.name || "Oyuncu",
@@ -196,13 +183,21 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- OYUN İÇİ EYLEMLER ---
   socket.on('send_chat_message', (data) => {
     io.to(data.roomId).emit('receive_chat_message', {
       senderId: socket.id,
       senderName: data.senderName,
       text: data.text
     });
+  });
+
+  // 🔥 YENİ: Arkadaşlık isteği bildirimi
+  socket.on('send_friend_request_notification', (data) => {
+    if (data.targetId) {
+        io.to(data.targetId).emit('receive_friend_request', {
+            fromName: data.fromName
+        });
+    }
   });
 
   socket.on('roll_dice', (data) => {
@@ -243,12 +238,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- KOPMA VE ÇIKMA İŞLEMLERİ ---
   const handleDisconnect = (socketId) => {
     console.log("Kopan Oyuncu:", socketId);
     let listChanged = false;
 
-    // Oyuncunun detaylarını temizle
     if (playerDetails[socketId]) {
       delete playerDetails[socketId];
     }
@@ -264,17 +257,11 @@ io.on('connection', (socket) => {
         } else {
           broadcastPlayerUpdate(id);
 
-          // 🔥 Oyun başladıysa ve biri çıktıysa diğerine kazandığını bildir
           if (room.isGameStarted) {
-            const remainingIndex = 0; // Kalan ilk kişi (basit mantık)
-            // Kalan kişinin rengini bulmamız lazım, ama basitçe ilk rengi atayalım
-            // Daha gelişmişi: Kalan kişinin ID'sine göre rengini bulmak.
-            // Şimdilik kalan kişiye "Sen Kazandın" sinyali gönderelim.
-            // Kalan kişiye özel mesaj atıyoruz:
             const winnerId = room.players[0];
             io.to(id).emit('game_over_by_disconnect', {
               winnerId: winnerId
-            }); // ID gönderiyoruz
+            }); 
             delete rooms[id];
           }
         }
